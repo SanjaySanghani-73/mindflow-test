@@ -49,19 +49,38 @@ jobs:
         run: terraform validate -no-color
         continue-on-error: true
 
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: Run TFLint
+        id: tflint
+        working-directory: ./terraform
+        run: |
+          tflint --init
+          tflint --format compact
+        continue-on-error: true
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+        continue-on-error: true
+
       - name: Terraform Plan
         id: plan
         working-directory: ./terraform
         run: terraform plan -no-color -input=false
         continue-on-error: true
         env:
-          # Add your cloud credentials here as GitHub Secrets
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          # Azure credentials
           ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
           ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
           ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
           ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+          # GCP credentials
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
 
       - name: Comment on PR
@@ -76,6 +95,7 @@ jobs:
             | 🎨 Format | ${{ steps.fmt.outcome }} |
             | 🔧 Init | ${{ steps.init.outcome }} |
             | ✅ Validate | ${{ steps.validate.outcome }} |
+            | 🔍 TFLint | ${{ steps.tflint.outcome }} |
             | 📋 Plan | ${{ steps.plan.outcome }} |
             
             <details>
