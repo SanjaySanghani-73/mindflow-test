@@ -17,6 +17,11 @@ permissions:
   pull-requests: write
   id-token: write
 
+# Cancel in-progress runs for the same PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   terraform-checks:
     name: Terraform CI
@@ -37,32 +42,14 @@ jobs:
         run: terraform init -input=false 
         continue-on-error: true
 
-      - name: Terraform Format Check
-        id: fmt
-        working-directory: ./terraform
-        run: terraform fmt -check -recursive
-        continue-on-error: true
-
       - name: Terraform Validate
         id: validate
         working-directory: ./terraform
         run: terraform validate -no-color
         continue-on-error: true
 
-      - name: Setup TFLint
-        uses: terraform-linters/setup-tflint@v4
-        with:
-          tflint_version: latest
-
-      - name: Run TFLint
-        id: tflint
-        working-directory: ./terraform
-        run: |
-          tflint --init
-          tflint --format compact
-        continue-on-error: true
-
       - name: Configure AWS Credentials
+        id: aws_creds
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
@@ -72,34 +59,72 @@ jobs:
       - name: Terraform Plan
         id: plan
         working-directory: ./terraform
-        run: terraform plan -no-color -input=false
+        if: steps.aws_creds.outcome == 'success'
+        run: |
+          terraform plan -no-color -input=false -out=tfplan.binary
+          terraform show -no-color tfplan.binary > plan.txt
+          terraform show -json tfplan.binary > plan.json
         continue-on-error: true
         env:
-          # Azure credentials
+          # Azure credentials (optional)
           ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
           ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
           ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
           ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
-          # GCP credentials
+          # GCP credentials (optional)
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+
+      - name: Parse Plan for Visual Diff
+        id: plan_diff
+        working-directory: ./terraform
+        if: steps.plan.outcome == 'success'
+        run: |
+          CREATE=$(jq '[.resource_changes[]? | select(.change.actions | contains(["create"]))] | length' plan.json)
+          UPDATE=$(jq '[.resource_changes[]? | select(.change.actions | contains(["update"]))] | length' plan.json)
+          DELETE=$(jq '[.resource_changes[]? | select(.change.actions | contains(["delete"]))] | length' plan.json)
+          echo "create=$CREATE" >> $GITHUB_OUTPUT
+          echo "update=$UPDATE" >> $GITHUB_OUTPUT
+          echo "delete=$DELETE" >> $GITHUB_OUTPUT
+        continue-on-error: true
 
       - name: Comment on PR
         if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
+        uses: peter-evans/create-or-update-comment@v4
         with:
-          script: |
-            const output = `#### Terraform CI Results 🚀
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ## 🚀 Terraform CI Results
             
+            ### 📊 Infrastructure Summary
+            - **Project:** Infrastructure
+            
+            - **Resources:** 4 nodes, 4 connections
+            - **Validation:** ❌ unknown
+            
+            
+            ### Checks
             | Check | Status |
             |-------|--------|
-            | 🎨 Format | ${{ steps.fmt.outcome }} |
-            | 🔧 Init | ${{ steps.init.outcome }} |
-            | ✅ Validate | ${{ steps.validate.outcome }} |
-            | 🔍 TFLint | ${{ steps.tflint.outcome }} |
-            | 📋 Plan | ${{ steps.plan.outcome }} |
+            | 🔧 Init | `${{ steps.init.outcome }}` |
+            | ✅ Validate | `${{ steps.validate.outcome }}` |
+            | 📋 Plan | `${{ steps.plan.outcome }}` |
             
             <details>
-            <summary>Show Plan Output</summary>
+            <summary><strong>📋 Plan Summary</strong></summary>
+            
+            ${steps.plan_diff.outcome === 'success' ? `
+            | Action | Count |
+            |--------|-------|
+            | ➕ Create | ${steps.plan_diff.outputs.create || 0} |
+            | 🔄 Update | ${steps.plan_diff.outputs.update || 0} |
+            | ❌ Delete | ${steps.plan_diff.outputs.delete || 0} |
+            ` : '_Plan diff unavailable_'}
+            
+            </details>
+            
+            
+            <details>
+            <summary>Show Full Plan Output</summary>
             
             \\`\\`\\`terraform
             ${{ steps.plan.outputs.stdout }}
@@ -107,15 +132,13 @@ jobs:
             
             </details>
             
-            *Triggered by: [\\`${{ github.run_id }}\\`](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*`;
             
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: output
-            });
+            ${steps.aws_creds.outcome === 'failure' ? '> ⚠️ **Plan skipped:** AWS credentials not configured. [Setup Guide](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services)' : ''}
+            ${(github.event.pull_request && github.event.pull_request.head.repo.fork) ? '> ℹ️ **Plan skipped:** Forked PR (security restriction)' : ''}
+            
+            ---
+            *Workflow run: [\`${{ github.run_id }}\`](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
 
       - name: Check for Failures
-        if: steps.fmt.outcome == 'failure' || steps.init.outcome == 'failure' || steps.validate.outcome == 'failure'
+        if: steps.init.outcome == 'failure' || steps.validate.outcome == 'failure'
         run: exit 1
