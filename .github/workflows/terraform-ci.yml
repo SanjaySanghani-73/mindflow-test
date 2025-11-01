@@ -39,52 +39,13 @@ jobs:
       - name: Terraform Init
         id: init
         working-directory: ./terraform
-        run: terraform init -input=false 
+        run: terraform init -input=false -backend=false
         continue-on-error: true
 
       - name: Terraform Validate
         id: validate
         working-directory: ./terraform
         run: terraform validate -no-color
-        continue-on-error: true
-
-      - name: Configure AWS Credentials
-        id: aws_creds
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
-        continue-on-error: true
-
-      - name: Terraform Plan
-        id: plan
-        working-directory: ./terraform
-        if: steps.aws_creds.outcome == 'success'
-        run: |
-          terraform plan -no-color -input=false -out=tfplan.binary
-          terraform show -no-color tfplan.binary > plan.txt
-          terraform show -json tfplan.binary > plan.json
-        continue-on-error: true
-        env:
-          # Azure credentials (optional)
-          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
-          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
-          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
-          # GCP credentials (optional)
-          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-
-      - name: Parse Plan for Visual Diff
-        id: plan_diff
-        working-directory: ./terraform
-        if: steps.plan.outcome == 'success'
-        run: |
-          CREATE=$(jq '[.resource_changes[]? | select(.change.actions | contains(["create"]))] | length' plan.json)
-          UPDATE=$(jq '[.resource_changes[]? | select(.change.actions | contains(["update"]))] | length' plan.json)
-          DELETE=$(jq '[.resource_changes[]? | select(.change.actions | contains(["delete"]))] | length' plan.json)
-          echo "create=$CREATE" >> $GITHUB_OUTPUT
-          echo "update=$UPDATE" >> $GITHUB_OUTPUT
-          echo "delete=$DELETE" >> $GITHUB_OUTPUT
         continue-on-error: true
 
       - name: Comment on PR
@@ -95,46 +56,13 @@ jobs:
           body: |
             ## 🚀 Terraform CI Results
             
-            ### 📊 Infrastructure Summary
-            - **Project:** Infrastructure
-            
-            - **Resources:** 4 nodes, 4 connections
-            - **Validation:** ❌ unknown
-            
-            
             ### Checks
             | Check | Status |
             |-------|--------|
             | 🔧 Init | `${{ steps.init.outcome }}` |
             | ✅ Validate | `${{ steps.validate.outcome }}` |
-            | 📋 Plan | `${{ steps.plan.outcome }}` |
-            
-            <details>
-            <summary><strong>📋 Plan Summary</strong></summary>
-            
-            ${steps.plan_diff.outcome === 'success' ? `
-            | Action | Count |
-            |--------|-------|
-            | ➕ Create | ${steps.plan_diff.outputs.create || 0} |
-            | 🔄 Update | ${steps.plan_diff.outputs.update || 0} |
-            | ❌ Delete | ${steps.plan_diff.outputs.delete || 0} |
-            ` : '_Plan diff unavailable_'}
-            
-            </details>
             
             
-            <details>
-            <summary>Show Full Plan Output</summary>
-            
-            \\`\\`\\`terraform
-            ${{ steps.plan.outputs.stdout }}
-            \\`\\`\\`
-            
-            </details>
-            
-            
-            ${steps.aws_creds.outcome === 'failure' ? '> ⚠️ **Plan skipped:** AWS credentials not configured. [Setup Guide](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services)' : ''}
-            ${(github.event.pull_request && github.event.pull_request.head.repo.fork) ? '> ℹ️ **Plan skipped:** Forked PR (security restriction)' : ''}
             
             ---
             *Workflow run: [\`${{ github.run_id }}\`](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
